@@ -61,7 +61,7 @@ public class BinlogConsumer {
         consumers = new ArrayList<>();
         for (String taskName : taskList.split("[,;]+")) {
             Properties properties = reader.getSection(taskName);
-            TableConsumer consumer = new BasicTableConsumer(taskName, properties, defaultSrcDB, defaultPool, defaultDestDB);
+            TableConsumer consumer = new BasicTableConsumer2(taskName, properties, defaultSrcDB, defaultPool, defaultDestDB);
             consumers.add(consumer);
 
             logger.info("task[" + taskName + "] init");

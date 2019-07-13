@@ -1,10 +1,14 @@
 package chenbo.cimiss.transfer;
 
 import chenbo.cimiss.DBPool;
+import chenbo.cimiss.TableMappingManager;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.*;
 
 /**
@@ -14,8 +18,6 @@ public class TransferTask implements Runnable {
     private static Logger logger = LogManager.getLogger(TransferTask.class);
 
     private Connection srcConn, destConn;
-
-    private String srcTable, destTable;
 
     private String selectTemplate;
     private String selectSQL;
@@ -30,70 +32,47 @@ public class TransferTask implements Runnable {
 
     private long startPos = 0;
 
-    private Map<String, String> fieldsMap = new HashMap<>();
-
     private volatile boolean stop = false;
 
-    public TransferTask(String taskName, Properties properties, String srcDB, String destDB) {
-        srcDB = properties.getProperty("db.src", srcDB);
-        destDB = properties.getProperty("db.dest", destDB);
+    private TableMappingManager mappingManager;
 
-        String table = properties.getProperty("table", taskName);
-        this.srcTable = properties.getProperty("table.src", table);
-        this.destTable = properties.getProperty("table.dest", this.srcTable);
+    public TransferTask(String taskName, Properties properties, String srcPool, String defaultSrcDB, String destPool, String defaultDestDB) {
+        mappingManager = new TableMappingManager(taskName, properties, defaultSrcDB, defaultDestDB);
 
         this.syncMode = properties.getProperty("sync.mode", "one");
 
         this.period = Integer.parseInt(properties.getProperty("task.period", "3600"));
 
-        logger.info("task["+taskName+"] config: "+ srcDB+":"+srcTable+" -> " + destDB+":"+destTable);
+        logger.info("task["+taskName+"] config: "+
+                mappingManager.getSrcDB()+"."+
+                mappingManager.getSrcTable()+
+                " -> " +
+                mappingManager.getDestDB()+
+                ":"+
+                mappingManager.getDestTable());
 
-        //mapping
-        String mapping = properties.getProperty("fields.mapping");
-        for (String part : mapping.split("[,;\t]+")) {
-            String from, to;
-            int pos = part.indexOf(':');
-            if (pos < 0) {//不改变迁移后的字段名称
-                from = part.trim();
-                to = from;
-            } else {
-                from = part.substring(0, pos).trim();
-                to = part.substring(pos + 1).trim();
-                if (to.isEmpty()) {//不改变迁移后的字段名称
-                    to = from;
-                }
-            }
-            if (from.isEmpty()) {
-                continue;
-            }
-            fieldsMap.put(from.toLowerCase(), to.toLowerCase());
-        }
+        this.srcConn = DBPool.getInstance().getConnection(srcPool);
+        this.destConn = DBPool.getInstance().getConnection(destPool);
 
-        srcConn = DBPool.getInstance().getConnection(srcDB);
-        destConn = DBPool.getInstance().getConnection(destDB);
-
-        selectTemplate = properties.getProperty("task.select", "select * from " + srcTable);
+        this.selectTemplate = properties.getProperty("task.select", "select * from " + mappingManager.getSrcTable());
 
         this.fetchBatch = Integer.parseInt(properties.getProperty("fetch.batch", "1000"));
 
+        this.batch = Integer.parseInt(properties.getProperty("write.batch", "1000"));
     }
 
     private FetchStatus transfer(ResultSet resultSet) throws SQLException {
         //获取映射后的字段列表
-        ResultSetMetaData metaData = resultSet.getMetaData();
-        int count = metaData.getColumnCount();
-        List<String> destFields = new ArrayList<>(count); //新字段名
-        Map<String, Integer> indexMap = new HashMap<>(count);//字段名与其下标的对应：原表字名 -> 新表的下标
-        for (int i = 0; i < count; ++i) {
-            String src = metaData.getColumnName(i + 1).toLowerCase();
-            if (fieldsMap.containsKey(src)) {//仅处理已配置的字段
-                destFields.add(fieldsMap.get(src));
-                indexMap.put(src, indexMap.size());
-            }
-        }
+        //ResultSetMetaData metaData = resultSet.getMetaData();
+        //int count = metaData.getColumnCount();
 
-        final String sql = String.format("insert into %s %s values %s", destTable,
-                makeFieldsList(destFields), makeValuesPlaceholder(destFields.size()));
+        final Map<String, String> mapping = mappingManager.getFieldsMap();
+
+        //TODO 可以再判断一下 resultSet是否包含需要的列
+
+        //注意字段的对应关系
+        final List<String> destFields = mappingManager.getDestFields();
+        final String sql = mappingManager.getInsertSQLTemp();
 
         logger.debug("SQL: " + sql);
 
@@ -105,11 +84,11 @@ public class TransferTask implements Runnable {
         while (resultSet.next()) {
 
             //设置当前行数据
-            for (String field : indexMap.keySet()) {
-
-                Object value = resultSet.getObject(field);
-
-                pstmt.setObject(indexMap.get(field) + 1, value);
+            int num = 0;
+            for (String destField : destFields) {
+                final String srcField = mapping.get(destField);
+                final Object value = resultSet.getObject(srcField);
+                pstmt.setObject(++num, value);
             }
 
             //添加到批任务中
@@ -148,32 +127,6 @@ public class TransferTask implements Runnable {
         int[] updates = pstmt.executeBatch();
         pstmt.clearBatch();
         logger.info(expect + " rows submitted");
-    }
-
-    private String makeFieldsList(List<String> list) {
-        StringBuilder sb = new StringBuilder("(");
-        for (int i = 0, n = list.size(); i < n; ++i) {
-            sb.append("`");
-            sb.append(list.get(i));
-            sb.append("`");
-            if (i < n - 1) {
-                sb.append(",");
-            }
-        }
-        sb.append(")");
-        return sb.toString();
-    }
-
-    private String makeValuesPlaceholder(int n) {
-        StringBuilder sb = new StringBuilder("(");
-        for (int i = 0; i < n; ++i) {
-            sb.append("?");
-            if (i < n - 1) {
-                sb.append(",");
-            }
-        }
-        sb.append(")");
-        return sb.toString();
     }
 
     /**
@@ -267,7 +220,7 @@ public class TransferTask implements Runnable {
 
     private void makeSelect() {
         selectSQL = selectTemplate
-                .replaceAll("<TABLE>", srcTable)
+                .replaceAll("<TABLE>", mappingManager.getSrcTable())
                 .replaceAll("<START>", String.valueOf(startPos))
                 .replaceAll("<LIMIT>", String.valueOf(fetchBatch));
     }

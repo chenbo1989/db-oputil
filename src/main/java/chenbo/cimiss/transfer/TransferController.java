@@ -19,12 +19,15 @@ public class TransferController {
     private List<TransferTask> tasks = new ArrayList<>(8);
     private List<Thread> threads = new ArrayList<>(8);
 
+    private String srcPool, destPool;
     private String defaultSrcDB, defaultDestDB;
 
     private String taskList = null;
 
     public TransferController(String config){
         reader = new IniReader(config);
+        this.srcPool = reader.getGlobalValue("db.pool.src");
+        this.destPool = reader.getGlobalValue("db.pool.dest");
         this.defaultSrcDB = reader.getGlobalValue("db.src");
         this.defaultDestDB = reader.getGlobalValue("db.dest");
     }
@@ -46,7 +49,7 @@ public class TransferController {
 
     public TransferTask genTask(String taskName) {
         Properties properties = reader.getSection(taskName);
-        TransferTask task = new TransferTask(taskName, properties, defaultSrcDB, defaultDestDB);
+        TransferTask task = new TransferTask(taskName, properties, srcPool, defaultSrcDB, destPool, defaultDestDB);
         return task;
     }
 
